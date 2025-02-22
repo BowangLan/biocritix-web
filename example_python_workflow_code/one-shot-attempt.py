@@ -35,13 +35,15 @@ class BiorxivSearcher:
         # Update to use the details endpoint
         self.base_url = "https://api.biorxiv.org/details/biorxiv"
 
-    def search_papers(self, keywords: List[str], max_results: int = 5) -> List[Dict]:
+    def search_papers(self, keywords: List[str], max_results: int = 20) -> List[Dict]:
         print(f"keywords: {keywords}")
         all_papers = []
         for keyword in keywords:
             print(f"Searching for keyword: {keyword}")
             # Using the details endpoint with date range
-            response = requests.get(f"{self.base_url}/2023-01-01/2024-12-31/0")
+            response = requests.get(
+                f"{self.base_url}/2023-01-01/2024-12-31/0/{max_results}"
+            )
 
             if response.status_code == 200:
                 data = response.json()
@@ -61,12 +63,12 @@ class BiorxivSearcher:
         return list(unique_papers.values())[:max_results]
 
     def download_paper_html(self, doi: str) -> str:
-        paper_url = f"https://www.biorxiv.org/content/{doi}v1"
+        paper_url = f"https://www.biorxiv.org/content/{doi}.full"
         response = requests.get(paper_url)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
-            content = soup.find("div", {"class": "content"})
-            print(content)
+            content = soup.find("div", {"class": "main-content-wrapper"})
+            print(content.get_text())
             return content.get_text() if content else ""
         return ""
 
@@ -155,7 +157,7 @@ def main():
     )
 
     # Run the crew
-    result = crew.kickoff()
+    result = crew.kickoff(max_iterations=12)
     print("\nCrewAI Analysis Results:")
     print(result)
 
