@@ -9,13 +9,14 @@ argparse = "*"
 typing = "*"
 numpy = "*"
 sentence-transformers = "*"
-crewai = "*"
 "langchain.tools" = "*"
 langchain = "*"
 langchain-openai = "*"
 lancedb = "*"
 bs4 = "*"
 python-dotenv = "*"
+crewai = "*"
+crewai-tools = "*"
 
 [dev-packages]
 
