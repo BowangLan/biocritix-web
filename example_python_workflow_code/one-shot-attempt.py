@@ -1,177 +1,164 @@
-import requests
-import json
-import lancedb
+# !pip install requests beautifulsoup4 crewai crewai-tools openai
+
+# from google.colab import userdata
 import os
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+dotenv_path = os.path.join(os.path.dirname(__file__), "..", ".env.local")
+load_dotenv(dotenv_path)
+# print(os.environ)
+# Set up OpenAI API key
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("Could not find API key in environment variables")
+    OPENAI_API_KEY = input("Please enter your OpenAI API key: ")
+    if not OPENAI_API_KEY:
+        raise ValueError("OpenAI API key is required to proceed")
+
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+print("OpenAI API key has been set successfully!")
+
+from typing import Dict, List
+
+import requests
 from bs4 import BeautifulSoup
-import argparse
-from typing import List, Dict
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from crewai import Agent, Task, Crew
-from langchain.tools import Tool
-from langchain.agents import Tool
-from langchain_openai import ChatOpenAI
+from crewai import Agent, Crew, Task
+from crewai_tools import RagTool
+
 
 class BiorxivSearcher:
     def __init__(self):
+        # Update to use the details endpoint
         self.base_url = "https://api.biorxiv.org/details/biorxiv"
-        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        
+
     def search_papers(self, keywords: List[str], max_results: int = 5) -> List[Dict]:
+        print(f"keywords: {keywords}")
         all_papers = []
         for keyword in keywords:
-            response = requests.get(f"{self.base_url}/{keyword}/0/5")
+            print(f"Searching for keyword: {keyword}")
+            # Using the details endpoint with date range
+            response = requests.get(f"{self.base_url}/2023-01-01/2024-12-31/0")
+
             if response.status_code == 200:
                 data = response.json()
-                all_papers.extend(data.get('collection', []))
-        
+                # Filter results that contain the keyword in title or abstract
+                matching_papers = [
+                    paper
+                    for paper in data.get("collection", [])
+                    if keyword.lower() in paper.get("title", "").lower()
+                    or keyword.lower() in paper.get("abstract", "").lower()
+                ]
+                all_papers.extend(matching_papers)
+            else:
+                print(f"Failed response with code {response.status_code}")
+
         # Deduplicate papers based on DOI
-        unique_papers = {paper['doi']: paper for paper in all_papers}
+        unique_papers = {paper["doi"]: paper for paper in all_papers}
         return list(unique_papers.values())[:max_results]
 
     def download_paper_html(self, doi: str) -> str:
-        # Convert DOI to biorxiv URL
         paper_url = f"https://www.biorxiv.org/content/{doi}v1"
         response = requests.get(paper_url)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # Extract main content
-            content = soup.find('div', {'class': 'content'})
+            soup = BeautifulSoup(response.text, "html.parser")
+            content = soup.find("div", {"class": "content"})
+            print(content)
             return content.get_text() if content else ""
         return ""
 
-class VectorStore:
-    def __init__(self):
-        self.db = lancedb.connect('~/paper_store.lance')
-        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        
-    def create_table(self):
-        schema = {
-            "text": "string",
-            "doi": "string",
-            "title": "string",
-            "vector": "float32[384]"  # Dimension matches all-MiniLM-L6-v2
-        }
-        if "papers" not in self.db.table_names():
-            self.db.create_table("papers", schema=schema)
-        return self.db.open_table("papers")
 
-    def add_papers(self, papers: List[Dict]):
-        table = self.create_table()
-        for paper in papers:
-            html_content = BiorxivSearcher().download_paper_html(paper['doi'])
-            # Split content into chunks (simplified chunking)
-            chunks = [html_content[i:i+1000] for i in range(0, len(html_content), 1000)]
-            
-            for chunk in chunks:
-                vector = self.encoder.encode(chunk)
-                table.add([{
-                    "text": chunk,
-                    "doi": paper['doi'],
-                    "title": paper['title'],
-                    "vector": vector.tolist()
-                }])
+def process_papers(papers: List[Dict]) -> List[str]:
+    """Convert papers to text documents for RAG"""
+    searcher = BiorxivSearcher()
+    documents = []
+    for paper in papers:
+        content = searcher.download_paper_html(paper["doi"])
+        if content:
+            # Add metadata as header
+            header = f"Title: {paper['title']}\nDOI: {paper['doi']}\n\n"
+            documents.append(header + content)
+    return documents
 
-    def search(self, query: str, k: int = 3):
-        table = self.db.open_table("papers")
-        query_vector = self.encoder.encode(query)
-        results = table.search(query_vector).limit(k).to_list()
-        return results
-
-class PaperAnalysisAgent:
-    def __init__(self, vector_store: VectorStore):
-        self.vector_store = vector_store
-        self.llm = ChatOpenAI(model="gpt-4-turbo-preview")
-        
-    def create_researcher(self) -> Agent:
-        return Agent(
-            role='Research Analyst',
-            goal='Analyze scientific papers and provide accurate insights',
-            backstory='You are an expert research analyst with deep knowledge of scientific literature',
-            llm=self.llm,
-            tools=[
-                Tool(
-                    name='Search Papers',
-                    func=self.search_papers,
-                    description='Search through the paper database'
-                )
-            ]
-        )
-    
-    def create_writer(self) -> Agent:
-        return Agent(
-            role='Technical Writer',
-            goal='Synthesize research findings into clear explanations',
-            backstory='You are a skilled technical writer who can explain complex concepts clearly',
-            llm=self.llm,
-            tools=[
-                Tool(
-                    name='Search Papers',
-                    func=self.search_papers,
-                    description='Search through the paper database'
-                )
-            ]
-        )
-    
-    def search_papers(self, query: str) -> str:
-        results = self.vector_store.search(query)
-        return json.dumps([{
-            'title': r['title'],
-            'text': r['text'][:500] + '...' if len(r['text']) > 500 else r['text']
-        } for r in results])
 
 def main():
-    parser = argparse.ArgumentParser(description='Search and analyze biorxiv papers')
-    parser.add_argument('--prompts', nargs=4, required=True, help='Four search keywords')
-    args = parser.parse_args()
+    # Interactive input version
+    keywords = []
+    print("Enter 4 search keywords (press Enter after each):")
+    for i in range(4):
+        keyword = input(f"Keyword {i+1}: ")
+        keywords.append(keyword)
 
     # Initialize components
     searcher = BiorxivSearcher()
-    vector_store = VectorStore()
-    
+    print("post searcher")
     # Search and download papers
-    papers = searcher.search_papers(args.prompts)
+    papers = searcher.search_papers(keywords)
     print(f"Found {len(papers)} papers")
-    
-    # Store papers in vector database
-    vector_store.add_papers(papers)
-    print("Papers stored in vector database")
-    
-    # Initialize agents
-    agent_system = PaperAnalysisAgent(vector_store)
-    researcher = agent_system.create_researcher()
-    writer = agent_system.create_writer()
-    
+
+    if len(papers) == 0:
+        print("test No papers found. Please try different keywords.")
+        return
+
+    # Process papers into documents
+    documents = process_papers(papers)
+    print("Papers processed and ready for analysis")
+
+    # Create RAG tool
+    rag_tool = RagTool(
+        description="Search and analyze scientific papers from biorxiv",
+        documents=documents,
+    )
+
+    # Create agents
+    researcher = Agent(
+        role="Research Analyst",
+        goal="Analyze scientific papers and provide accurate insights",
+        backstory="""You are an expert research analyst with deep knowledge of 
+        scientific literature. You excel at identifying key findings and methodologies.""",
+        tools=[rag_tool],
+    )
+
+    writer = Agent(
+        role="Technical Writer",
+        goal="Synthesize research findings into clear explanations",
+        backstory="""You are a skilled technical writer who can explain complex 
+        scientific concepts clearly and accurately. You excel at creating 
+        comprehensive summaries.""",
+        tools=[rag_tool],
+    )
+
     # Create crew
     crew = Crew(
         agents=[researcher, writer],
         tasks=[
             Task(
-                description="Analyze the papers and identify key findings",
-                agent=researcher
+                description="""Analyze the papers and identify key findings, methods, 
+                and potential implications. Focus on extracting the most significant 
+                research contributions.""",
+                expected_output="""A detailed analysis of the key findings, methods, and implications 
+                from the research papers, with specific examples and citations.""",
+                agent=researcher,
             ),
             Task(
-                description="Create a clear summary of the research findings",
-                agent=writer
-            )
-        ]
+                description="""Create a clear, comprehensive summary of the research 
+                findings. Explain complex concepts in an accessible way while maintaining 
+                scientific accuracy.""",
+                expected_output="""A clear, well-structured summary of the research findings that 
+                explains complex concepts in an accessible way while maintaining accuracy.""",
+                agent=writer,
+            ),
+        ],
     )
-    
+
     # Run the crew
     result = crew.kickoff()
     print("\nCrewAI Analysis Results:")
     print(result)
 
+
 if __name__ == "__main__":
     main()
-
-# Requirements.txt
-"""
-requests
-beautifulsoup4
-lancedb
-sentence-transformers
-crewai
-langchain
-langchain-openai
-"""
