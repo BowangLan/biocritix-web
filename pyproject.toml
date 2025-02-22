@@ -1,0 +1,15 @@
+[project]
+name = "nextjs-ai-chatbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.13.3",
+    "crewai>=0.102.0",
+    "crewai-tools>=0.36.0",
+    "lxml>=5.3.1",
+    "openai>=1.64.0",
+    "requests>=2.32.3",
+    "rich>=13.9.4",
+]
